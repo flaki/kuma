@@ -1,5 +1,5 @@
-/* jshint node: true */
-/* global self */
+/* jshint worker: true, globalstrict: true */
+/* global self, caches, fetch */
 'use strict';
 
 
@@ -16,12 +16,12 @@ var urlsStatic = [
   '//mozorg.cdn.mozilla.net/media/css/tabzilla-min.css',
   '//mozorg.cdn.mozilla.net/media/img/tabzilla/tab.png',
 
-  '/media/css/font-awesome.css?build=1427570753',
-  '/media/css/main.css?build=1427570753',
-  '/media/css/badges.css?build=1427570753',
-  '/media/css/wiki.css?build=1427570753',
-  '/media/css/zones.css?build=1427570753',
-  '/media/css/diff.css?build=1427570753',
+  '/media/css/font-awesome.css?build=1427671832',
+  '/media/css/main.css?build=1427671832',
+  '/media/css/badges.css?build=1427671832',
+  '/media/css/wiki.css?build=1427671832',
+  '/media/css/zones.css?build=1427671832',
+  '/media/css/diff.css?build=1427671832',
 
   '/media/js/libs/prism/themes/prism.css?build=1427469741',
   '/media/js/libs/prism/plugins/line-highlight/prism-line-highlight.css?build=1427469741',
@@ -30,7 +30,7 @@ var urlsStatic = [
   '/media/js/prism-mdn/plugins/line-numbering/prism-line-numbering.css?build=1427469741',
   '/media/js/prism-mdn/components/prism-json.css?build=1427469741',
 
-  '/media/css/wiki-syntax.css?build=1427570753',
+  '/media/css/wiki-syntax.css?build=1427671832',
 
   '/en-US/jsi18n/build:dev',
 
@@ -51,14 +51,6 @@ var urlsStatic = [
 
   '/media/img/header-background.png',
   '/media/img/logo_sprite.svg?2014-01'
-];
-
-var CACHE_DOCS = 'mdn-docs';
-var urlsDocs = [
-  '/en-US/docs/Web/Reference/API',
-  '/en-US/docs/DOM',
-  '/en-US/docs/DOM/DOM_Reference/Introduction',
-  '/en-US/docs/WebAPI/Using_Light_Events'
 ];
 
 self.addEventListener('install', function(event) {
@@ -87,35 +79,82 @@ self.addEventListener('activate', function(event) {
 });
 
 
-self.addEventListener('message', function(event) {
-  console.log('Caching requested: ', event);
+// Service Worker client API - all calls are async, return a Promise
+var API = {
+  // Check if mdn-docs-<section-name> is already cached
+  'is-cached': function(message) {
+    var cacheid='mdn-docs-' + message.data.section;
 
-  populateCaches();
+    return caches.has(cacheid).then(function(cacheExists) {
+      return { command: 'is-cached', result: {
+        section: message.data.section,
+        cached: cacheExists
+      }};
+    });
+  },
+
+  // Store in cache under mdn-docs-<section-name>
+  'cache': function(message) {
+    var cacheid='mdn-docs-' + message.data.section;
+
+    // Open storage & save URLs
+    self.caches.open(cacheid)
+      // Save urls to respective caches
+      .then(function(cache) {
+        console.log('Adding urls to ', cache);
+
+        return cache.addAll(message.data.urls);
+
+      // Caching done
+      }).then(function() {
+        console.log('Cache populated successfully');
+        return { command: 'cache', ok: {
+          section: message.data.section,
+          cached: true
+        }};
+
+      // Caching failed
+      }).catch(function(err) {
+        console.log('Failed to populate cache! Error: ' + err);
+        return { command: 'is-cached', fail: {
+          error: err
+        }};
+
+      });
+
+    return Promise.resolve(message);
+  }
+};
+
+// API interface
+self.addEventListener('message', function(event) {
+  console.log('Invoked SW API: ', event);
+
+  // If API endpoint (command) exists, respond with the returned data
+  if (API.hasOwnProperty(event.data.command)) {
+    API[event.data.command].call(null, event.data).then(function(result) {
+      console.log('Posting result `', result);
+      event.ports[0].postMessage(result);
+    });
+  }
 });
 
 
-function populateCaches() {
-  // Open both cache storages
-  return Promise.all([
-    self.caches.open(CACHE_STATIC),
-    self.caches.open(CACHE_DOCS)
+self.onfetch = function(event) {
+  var requestURL = new URL(event.request.url);
+  if (requestURL.hostname === 'developer-local.allizom.org') {
+    event.respondWith(
+      caches.match(event.request).then(function(response) {
+        if (response) {
+          console.log('✓Cached: ', event.request.url);
+          return response;
+        }
 
-  // Save urls to respective caches
-  ]).then(function(cacheList) {
-      console.log('Opened caches mdn-static & mdn-docs', cacheList);
-
-      return Promise.all([
-        cacheList[0].addAll(urlsStatic),
-        cacheList[1].addAll(urlsDocs)
-      ]);
-
-  // Caching done
-  }).then(function() {
-    console.log('Caches populated successfully');
-
-  // Caching failed
-  }).catch(function(err) {
-    console.log('Failed to populate caches! Error: ' + err);
-
-  });
-}
+        return fetch(event.request.clone()).then(function(response) {
+          console.log('Fetched: ', event.request.url);
+          return response.clone();
+        });
+      })
+    );
+  }
+};
